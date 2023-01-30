@@ -1,0 +1,253 @@
+---
+title: "Web scraping with R"
+author: "Mariangela Arca"
+date: "2023-01-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Getting started
+
+```{r}
+library("RSelenium")
+library("rvest")
+library("tidyverse")
+library("netstat")
+```
+## Opening up a browser
+```{r}
+port <- netstat::free_port()
+rD <<- rsDriver(browser = "firefox"
+                                  ,geckover="latest"
+                                  ,chromever=NULL
+                                  ,check = F  
+                                  ,port = port
+                                  ,verbose = T
+)
+
+remDr <- rD[["client"]]
+
+
+
+url = "https://fr.indeed.com/jobs?q=data%20scientist&l=France&from=searchOnHP"
+# Headless Firefox browser
+exCap <- list("moz:firefoxOptions" = list(args = list('--headless')))
+# rD <- rsDriver(browser = "firefox", extraCapabilities = exCap, port=port,
+#                 verbose = F)
+# remDr <- rD$client
+# Navigate to the url
+remDr$navigate(url)
+# Store page source 
+web_page <- remDr$getPageSource(header = TRUE)[[1]] %>% read_html()
+
+```
+
+```{r}
+# Creating URL link corresponding to the first 40 pages
+base_url = "https://fr.indeed.com/jobs?q=data%20scientist&l=France&start="
+url_list <- c(url, paste0(base_url, as.character(seq(from=10, to=400, by=10))))
+
+# Looping through the URL list
+res <- list()
+for(i in 1:length(url_list)){
+  # Navigate to the URL
+  remDr$navigate(url_list[i])
+  
+  # Store page source 
+  web_page <- remDr$getPageSource(header = TRUE)[[1]] %>% read_html()
+
+  # Job title 
+  job_title <- web_page %>%
+    html_elements(css = ".mosaic-provider-jobcards .result") %>%
+    html_elements(css = ".resultContent") %>%
+    html_element("h2") %>%
+    html_text2() %>%
+    str_replace(".css.*;\\}", "")
+
+  # URL for job post 
+  job_url <- web_page %>%
+    html_elements(css = ".mosaic-provider-jobcards .result")%>%
+    html_elements(css = ".resultContent") %>%
+    html_element("h2") %>%
+    html_element("a") %>%
+    html_attr('href') %>%
+    lapply(function(x){paste0("https://fr.indeed.com", x)}) %>%
+    unlist()
+  
+  # Data about company
+  company_info <- web_page %>%
+    html_elements(css = ".mosaic-provider-jobcards .result")%>%
+    html_elements(css = ".resultContent")%>%
+    html_element(css = ".company_location")%>%
+    html_text2() %>%
+    lapply(FUN = tidy_comploc) %>% # Function to clean the textual data
+    do.call(rbind, .)
+
+  # Data about job description
+  job_desc <- web_page %>%
+    html_elements(css = ".mosaic-provider-jobcards .result")%>%
+    html_element(css =".slider_container .jobCardShelfContainer")%>%
+    html_text2() %>%
+    tidy_job_desc() # Function to clean the textual data related to job desc.
+
+  # Data about salary (when indicated)
+  salary_hour <- web_page %>%
+    html_elements(css = ".mosaic-provider-jobcards .result .resultContent")%>%
+    html_element(css = ".salaryOnly") %>%
+    html_text2() %>%
+    lapply(FUN = tidy_salary) %>% # Function to clean the data related to salary
+    do.call(rbind, .)
+  
+  # Job posts in the same format
+  final_df <- cbind(job_title, company_info, salary_hour, job_desc, job_url)
+  colnames(final_df) <- c("Job_title", "Company", "Location", "Rating", "Low_salary", "High_salary", "Contract_info", "Job_desc", "url")
+  res[[i]] <- final_df
+  
+  # Sleep 5 seconds, good practice for web scraping
+  Sys.sleep(5)
+}
+
+# Gather all the job post in a tibble
+final_df <- as_tibble(do.call("rbind", res))
+
+# Final data cleaning
+final_df <- final_df %>%
+  mutate_at(c("Rating", "Low_salary", "High_salary"), as.numeric)
+
+# Clean job title
+final_df$Job_title_c <- clean_job_title(final_df$Job_title)  
+final_df$Job_title_c <- as.factor(final_df$Job_title_c)
+final_df <- tidy_location(final_df )
+```
+
+## Salary by company
+
+```{r}
+# Function to make euro X scale 
+euro <- scales::label_dollar(
+  prefix = "",
+  suffix = "\u20ac",
+  big.mark = ".",
+  decimal.mark = ","
+)
+
+final_df %>%
+  filter(Low_salary > 1600) %>% # To remove internships and freelance works
+  select(Company, Low_salary, High_salary) %>%
+  group_by(Company) %>%
+  summarize_if(is.numeric, mean) %>%
+  mutate(Mean_salary = rowMeans(cbind(Low_salary, High_salary), na.rm = T),
+           Company = fct_reorder(Company, desc(-Mean_salary))) %>%
+  ggplot(aes(x = Company)) +
+  geom_point(aes(y = Mean_salary), colour = "#267266") +
+  geom_linerange(aes(ymin = Low_salary, ymax = High_salary)) +
+  geom_hline(aes(yintercept = median(Mean_salary)), lty=2, col='red', alpha = 0.7) +
+  scale_y_continuous(labels = euro) +
+  ylab("Monthly income") +
+  xlab("") +
+  coord_flip() +
+  theme_bw(base_size = 8)
+```
+## Salary by job title
+
+```{r}
+final_df %>%
+  filter(Low_salary > 1600) %>%  # To remove internships and freelance works
+  select(Job_title_c, Low_salary, High_salary, Job_type) %>%
+  group_by(Job_title_c) %>%
+  summarize_if(is.numeric, ~ mean(.x, na.rm = TRUE)) %>%
+  mutate(Mean_salary = rowMeans(cbind(Low_salary, High_salary), na.rm = T),
+         Job_title_c = fct_reorder(Job_title_c, desc(-Mean_salary))) %>%
+  ggplot(aes(x = Job_title_c, y = Mean_salary)) +
+  geom_point(aes(y = Mean_salary), colour = "#267266") +
+  geom_linerange(aes(ymin = Low_salary, ymax = High_salary)) +
+  #geom_label(aes(label = n, Job_title_c, y = 1500), data = count_df) + 
+  scale_y_continuous(labels = euro) +
+  theme_bw(base_size = 12) +
+  xlab("") +
+  ylab("Monthly Income") +
+  coord_flip()
+```
+## Salary depending on location: full remote, hybrid, on site ?
+```{r}
+# Tidy the types and locations of listed jobs
+final_df <- tidy_location(final_df)
+count_df <- count(final_df %>% filter(Low_salary > 1600), Job_type)
+final_df %>%
+  filter(Low_salary > 1600) %>% 
+  drop_na(Location) %>%
+  mutate(Mean_salary = rowMeans(cbind(Low_salary, High_salary), na.rm = T),
+         Job_type = as.factor(Job_type)) %>%
+    ggplot(aes(x = Job_type, y = Mean_salary)) +
+  geom_boxplot(na.rm = TRUE) +
+  geom_label(aes(label = n, Job_type, y = 5500), data = count_df) + 
+  scale_y_continuous(labels = euro) + 
+  theme_bw(base_size = 12) +
+  xlab("Job Type") +
+  ylab("Income")
+```
+## Mapping job locations
+
+```{r}
+# Extract coordinates from town name
+final_df <- final_df %>%
+  mutate(Loc_tidy_fr = paste(Loc_tidy, 'France')) %>%
+  geocode(Loc_tidy_fr, method = 'arcgis', lat = latitude , long = longitude) %>%
+  select(- Loc_tidy_fr)
+
+names(final_df)
+
+
+
+# Map of France from rnaturalearth package
+france <- ne_states(country = "France", returnclass = "sf") %>% 
+  filter(!name %in% c("Guyane française", "Martinique", "Guadeloupe", "La Réunion", "Mayotte"))
+
+
+
+
+# # Transform location to st point 
+test <- st_sf(final_df, geom= lapply(1:nrow(final_df), function(x){st_point(c(final_df$longitude[x],final_df$latitude[x]))}))
+st_crs(test) <- 4326
+
+# St_join by departments 
+joined <- france %>%
+  st_join(test, left = T)
+
+# Custom breaks for visual representation
+my_breaks = c(0, 2, 5, 10, 30, 50, 100, 260)
+
+joined %>% 
+  mutate(region=as.factor(name)) %>% 
+  group_by(region) %>% 
+  summarize(Job_number=n()) %>% 
+  mutate(Job_number = cut(Job_number, my_breaks)) %>% 
+  ggplot() +
+  geom_sf(aes(fill=Job_number), col='grey', lwd=0.2) + 
+  scale_fill_brewer("Job number",palette = "GnBu") + 
+  theme_bw()
+```
+
+## Analyzing job descriptions
+
+## Iteractive map
+
+```{r}
+# Plot leaflet map
+final_df %>%
+  mutate(pop_up_text = sprintf("<b>%s</b> <br/> %s",
+                                     Job_title, Company)) %>% # Make popup text
+  leaflet() %>%
+  setView(lng = 2.36, lat = 46.31, zoom = 5.2) %>% # Center of France
+  addProviderTiles(providers$CartoDB.Positron) %>%
+  addMarkers(
+    popup = ~as.character(pop_up_text),
+    clusterOptions = markerClusterOptions()
+  )
+```
+
+
+
