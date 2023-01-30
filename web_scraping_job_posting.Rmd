@@ -9,6 +9,16 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+Reference: {r} [https://www.r-bloggers.com/2022/09/optimizing-my-search-for-data-scientist-jobs-by-scraping-indeed-with-r/](https://www.r-bloggers.com/2022/09/optimizing-my-search-for-data-scientist-jobs-by-scraping-indeed-with-r/)
+
+# Import functions
+Import custom functions to clean data extracted from a webpage
+
+```{r}
+source("functions_html_data_cleaning.R")
+```
+
+
 ## Getting started
 
 ```{r}
@@ -17,6 +27,9 @@ library("rvest")
 library("tidyverse")
 library("netstat")
 ```
+
+
+
 ## Opening up a browser
 ```{r}
 port <- netstat::free_port()
